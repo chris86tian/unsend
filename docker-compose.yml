@@ -1,0 +1,122 @@
+name: unsend-prod
+
+services:
+  unsend-db-prod:
+    image: postgres:16
+    restart: always
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:?err}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?err}
+      - POSTGRES_DB=${POSTGRES_DB:?err}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - database:/var/lib/postgresql/data
+    networks:
+      - unsend-network
+
+  unsend-redis-prod:
+    image: redis:7
+    restart: always
+    volumes:
+      - cache:/data
+    command: ["redis-server", "--maxmemory-policy", "noeviction"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "PING"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+    networks:
+      - unsend-network
+
+  unsend-storage-prod:
+    image: minio/minio:latest
+    restart: always
+    expose:
+      - "9002"
+      - "9001"
+    volumes:
+      - storage:/data
+    environment:
+      MINIO_ROOT_USER: unsend
+      MINIO_ROOT_PASSWORD: password
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9002/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    entrypoint: sh
+    command: -c 'mkdir -p /data/unsend && minio server /data --console-address ":9001" --address ":9002"'
+    networks:
+      - unsend-network
+
+  unsend:
+    image: unsend/unsend:v1.5.3
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - DATABASE_URL=${DATABASE_URL:?err}
+      - NEXTAUTH_URL=https://unsendfork.lipahub.de
+      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET:?err}
+      - AWS_ACCESS_KEY=${AWS_ACCESS_KEY:?err}
+      - AWS_SECRET_KEY=${AWS_SECRET_KEY:?err}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:?err}
+      - GITHUB_ID=${GITHUB_ID:?err}
+      - GITHUB_SECRET=${GITHUB_SECRET:?err}
+      - REDIS_URL=${REDIS_URL:?err}
+      - NEXT_PUBLIC_IS_CLOUD=${NEXT_PUBLIC_IS_CLOUD:-false}
+      - API_RATE_LIMIT=${API_RATE_LIMIT:-1}
+      - NEXT_PUBLIC_SMTP_HOST=unsendfork.lipahub.de
+      - SMTP_HOST=unsendfork.lipahub.de
+      - HOSTNAME=0.0.0.0
+    depends_on:
+      unsend-db-prod:
+        condition: service_healthy
+      unsend-redis-prod:
+        condition: service_healthy
+      unsend-storage-prod:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3000/ || exit 1"]
+      interval: 30s
+      retries: 3
+      timeout: 10s
+      start_period: 90s
+    networks:
+      - unsend-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.unsend.rule=Host(`unsendfork.lipahub.de`)"
+      - "traefik.http.routers.unsend.entrypoints=websecure"
+      - "traefik.http.routers.unsend.tls=true"
+      - "traefik.http.routers.unsend.tls.certresolver=letsencrypt"
+      - "traefik.http.services.unsend.loadbalancer.server.port=3000"
+
+  unsend-smtp-server-prod:
+    image: unsend/smtp-proxy:latest
+    restart: always
+    ports:
+      - "25:25"
+      - "587:587"
+      - "2587:2587"
+    environment:
+      - SMTP_AUTH_USERNAME=${SMTP_AUTH_USERNAME:-unsend}
+      - UNSEND_BASE_URL=https://unsendfork.lipahub.de
+    depends_on:
+      - unsend
+    networks:
+      - unsend-network
+
+volumes:
+  database:
+  cache:
+  storage:
+
+networks:
+  unsend-network:
+    driver: bridge
